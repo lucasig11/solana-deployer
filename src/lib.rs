@@ -72,7 +72,7 @@ impl AppConfig {
             .context("Failed to parse config file.")?;
 
         let authority = read_keypair_file(&config.keypairs.authority)
-            .map_err(|e| anyhow!("Couldn't read keypair: {e}"))?;
+            .map_err(|e| anyhow!("Couldn't read payer keypair: {e}"))?;
 
         let program_kp_path = match config.keypairs.program {
             Some(kp) => kp,
