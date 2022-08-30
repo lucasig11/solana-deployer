@@ -1,0 +1,11 @@
+url = "https://api.devnet.solana.com"
+program_so = "./program.so"
+sleep = 100
+timeout = 30
+jobs = 8
+max_retries = 9000
+
+[keypairs]
+authority = "./payer.json"
+program = "./program-keypair.json"
+
