@@ -26,7 +26,6 @@ use std::{
 };
 
 mod utils;
-
 pub use utils::*;
 
 #[derive(Deserialize)]
@@ -35,7 +34,6 @@ pub struct Config {
     pub url: String,
     // TODO: search in target/deploy ?
     pub program_so: PathBuf,
-    #[serde(flatten)]
     pub options: Options,
     pub keypairs: Keypairs,
 }

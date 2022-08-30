@@ -1,23 +1,27 @@
 # solana-deployer
 
-### IMPORTANT: This project is not actively maintained. If you have problems with deploying you should try [Solana Playground Github](https://github.com/solana-playground/solana-playground).
-
 Deploy your Solana programs during high load.
+
+Fork from [solana-deployer by acheroncrypto](https://github.com/acheroncrypto/solana-deployer).
 
 ## Installation
 
-**Build from source:**
-
 ```sh
-git clone https://github.com/acheroncrypto/solana-deployer.git
-cd solana-deployer
-cargo build --release
+cargo install --git https://github.com/lucasig11/solana-deployer
 ```
-
-Change `.env` file accordingly.
 
 ## Run
 
+Download the _deploy.toml_ template.
 ```sh
-cargo run --release
+curl https://raw.githubusercontent.com/lucasig11/solana-deployer/master/example.toml -o deploy.toml
 ```
+Tweak it.
+```sh
+$EDITOR deploy.toml
+```
+Run the deployer.
+```sh
+solana-deployer [-c configuration_file]
+```
+
