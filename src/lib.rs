@@ -1,7 +1,7 @@
 use anyhow::{anyhow, ensure, Context, Result};
 use crossbeam::thread;
 use crossterm::{cursor, queue, terminal};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use solana_client::{
     rpc_client::RpcClient, rpc_config::RpcSendTransactionConfig,
 };
@@ -28,7 +28,7 @@ use std::{
 mod utils;
 pub use utils::*;
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Config {
     // TODO: monikers
     pub url: String,
@@ -38,7 +38,16 @@ pub struct Config {
     pub keypairs: Keypairs,
 }
 
-#[derive(Deserialize)]
+impl Config {
+    pub fn generate<W: Write>(writer: &mut W) -> Result<()> {
+        let contents = Self::default();
+        let contents = toml::to_vec(&contents)?;
+        writer.write_all(&contents)?;
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct Options {
     #[serde(default = "num_cpus::get")]
     pub jobs: usize,
@@ -47,11 +56,44 @@ pub struct Options {
     pub timeout: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Keypairs {
     // TODO: use solana_cli default
     pub authority: PathBuf,
     pub program: Option<PathBuf>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            url: String::from("https://localhost:8899"),
+            program_so: "./target/deploy/program.so".parse().unwrap(),
+            keypairs: Default::default(),
+            options: Default::default(),
+        }
+    }
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            jobs: num_cpus::get(),
+            max_retries: Some(9000),
+            sleep: 100,
+            timeout: 30,
+        }
+    }
+}
+
+impl Default for Keypairs {
+    fn default() -> Self {
+        Self {
+            authority: "~/.config/solana/id.json".parse().unwrap(),
+            program: Some(
+                "./target/deploy/program-keypair.json".parse().unwrap(),
+            ),
+        }
+    }
 }
 
 pub struct AppConfig {
@@ -66,10 +108,11 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn parse<P: AsRef<Path>>(p: P) -> Result<Self> {
-        let toml_config =
-            std::fs::read(p).context("Failed to read config file.")?;
-        let config: Config = toml::from_slice(&toml_config)
-            .context("Failed to parse config file.")?;
+        let config: Config = std::fs::read(p)
+            .context("Failed to read config file.")
+            .and_then(|c| {
+                toml::from_slice(&c).context("Failed to parse config file.")
+            })?;
 
         let authority = read_keypair_file(&config.keypairs.authority)
             .map_err(|e| anyhow!("Couldn't read payer keypair: {e}"))?;
