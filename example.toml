@@ -1,21 +1,21 @@
 # Url to a Solana RPC cluster.
 url = "https://api.devnet.solana.com"
-# Path to the program's shared object file.
-program_so = "./program.so"
 
 [options]
 # How many threads can be used to send WriteBuffer transactions.
 jobs = 8
-# Seconds to sleep in between RPC requests.
+# Interval in between RPC requests (millis).
 sleep = 100
-# RPC client configured timeout.
+# RPC client configured timeout (seconds).
 timeout = 30
 # RPC client configured max_retries.
 max_retries = 9000
 
-[keypairs]
-# Path to the program's keypair file.
-program = "./program-keypair.json"
+[programs]
 # Path to the program's update authority keypair file.
-authority = "./payer.json"
+authority = "./authority.json"
+# Path to the program's shared object file.
+shared_obj = "./program.so"
+# Path to the program's keypair file.
+keypair = "./program-keypair.json"
 
