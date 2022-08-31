@@ -9,8 +9,9 @@ use solana_client::{
 use solana_program_runtime::invoke_context::InvokeContext;
 use solana_rbpf::{elf, verifier, vm};
 use solana_sdk::{
-    commitment_config::CommitmentConfig, hash::Hash, message::Message,
-    packet::PACKET_DATA_SIZE, signature::Signature, transaction::Transaction,
+    bpf_loader_upgradeable, commitment_config::CommitmentConfig, hash::Hash,
+    message::Message, packet::PACKET_DATA_SIZE, pubkey::Pubkey,
+    signature::Signature, signer::Signer, transaction::Transaction,
     transaction_context::TransactionContext,
 };
 use std::{
@@ -18,11 +19,23 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn calculate_max_chunk_size<F>(create_msg: &F) -> Result<usize>
-where
-    F: Fn(u32, Vec<u8>, Hash) -> Message,
-{
-    let baseline_msg = create_msg(0, Vec::new(), Hash::new_unique());
+use crate::AppConfig;
+
+pub fn calculate_max_chunk_size(
+    config: &AppConfig,
+    buffer_acc: Pubkey,
+) -> Result<usize> {
+    let baseline_msg = Message::new_with_blockhash(
+        &[bpf_loader_upgradeable::write(
+            &buffer_acc,
+            &config.authority.pubkey(),
+            0,
+            vec![],
+        )],
+        Some(&config.authority.pubkey()),
+        &Hash::new_unique(),
+    );
+
     let tx_size = bincode::serialized_size(&Transaction {
         signatures: vec![
             Signature::default();
@@ -31,7 +44,7 @@ where
         message: baseline_msg,
     })? as usize;
 
-    // add 1 byte buffer to account for shortvec encoding
+    // Add a 1-byte-buffer to account for shortvec encoding.
     Ok(PACKET_DATA_SIZE.saturating_sub(tx_size).saturating_sub(1))
 }
 
@@ -75,7 +88,7 @@ pub fn send_and_confirm_transaction_with_config(
                 return Ok(hash);
             }
 
-            if Instant::now().duration_since(start_time).as_secs() > timeout {
+            if start_time.elapsed().as_secs() > timeout {
                 break;
             }
 

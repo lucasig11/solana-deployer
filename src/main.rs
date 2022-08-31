@@ -28,30 +28,31 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     if let Some(SubCommands::GenConfig { output }) = args.subcommands {
+        let cwd = std::env::current_dir()?;
         if let Some(filename) = output {
-            println!("Writing contents to {}.", filename);
             let mut fd = File::options()
                 .write(true)
                 .create_new(true)
-                .open(filename)
-                .context("Failed to create config file")?;
-            return Config::generate(&mut fd);
+                .open(&filename)
+                .context("Failed to create config file.")?;
+            println!("Writing contents to {}.", filename);
+            return generate_config(&mut fd, &cwd);
         }
-        return Config::generate(&mut std::io::stdout());
+        return generate_config(&mut std::io::stdout(), &cwd);
     }
 
     let config = AppConfig::parse(args.config_path)?;
     let start_ts = Instant::now();
 
     // Create new buffer account.
-    let (buffer_kp, buffer_len) = create_buffer_account(&config)?;
+    let (buffer_acc, buffer_sz) = create_buffer_account(&config)?;
 
     // Write to buffer account.
-    write_to_buffer_account(&config, buffer_kp.pubkey(), buffer_len)?;
+    write_to_buffer_account(&config, buffer_acc.pubkey(), buffer_sz)?;
 
     // Deploy/upgrade program.
-    if let Err(e) = deploy_or_upgrade_program(&config, buffer_kp.pubkey()) {
-        close_buffer_account(&config, buffer_kp.pubkey())?;
+    if let Err(e) = deploy_or_upgrade_program(&config, buffer_acc.pubkey()) {
+        close_buffer_account(&config, buffer_acc.pubkey())?;
         bail!(e);
     }
 

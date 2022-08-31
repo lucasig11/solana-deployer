@@ -3,7 +3,8 @@ use crossbeam::thread;
 use crossterm::{cursor, queue, terminal};
 use serde::{Deserialize, Serialize};
 use solana_client::{
-    rpc_client::RpcClient, rpc_config::RpcSendTransactionConfig,
+    client_error::reqwest::Url, rpc_client::RpcClient,
+    rpc_config::RpcSendTransactionConfig,
 };
 use solana_sdk::{
     bpf_loader_upgradeable::{
@@ -11,7 +12,6 @@ use solana_sdk::{
         UpgradeableLoaderState,
     },
     commitment_config::{CommitmentConfig, CommitmentLevel},
-    hash::Hash,
     message::Message,
     native_token::lamports_to_sol,
     pubkey::Pubkey,
@@ -29,46 +29,80 @@ mod utils;
 pub use utils::*;
 
 #[derive(Serialize, Deserialize)]
-pub struct Config {
+struct Config {
     // TODO: monikers
     pub url: String,
-    // TODO: search in target/deploy ?
-    pub program_so: PathBuf,
+    pub program: Program,
     pub options: Options,
-    pub keypairs: Keypairs,
 }
 
-impl Config {
-    pub fn generate<W: Write>(writer: &mut W) -> Result<()> {
-        let contents = Self::default();
-        let contents = toml::to_vec(&contents)?;
-        writer.write_all(&contents)?;
-        Ok(())
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Program {
+    // TODO: use solana_cli default
+    pub authority: PathBuf,
+    pub keypair: PathBuf,
+    // TODO: search in target/deploy ?
+    pub shared_obj: PathBuf,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Options {
-    #[serde(default = "num_cpus::get")]
     pub jobs: usize,
     pub max_retries: Option<usize>,
     pub sleep: u64,
     pub timeout: u64,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct Keypairs {
-    // TODO: use solana_cli default
-    pub authority: PathBuf,
-    pub program: Option<PathBuf>,
+/// Generates a new configuration file using the defaults and tries to find the program keypair and
+/// shared object files in ./target/deploy.
+pub fn generate_config<W: Write>(writer: &mut W, cwd: &Path) -> Result<()> {
+    let deploy_dir = cwd.join("target").join("deploy");
+    let program = match std::fs::read_dir(deploy_dir) {
+        Err(_) => Program::default(),
+        // Try to find program-keypair.json and program.so
+        Ok(entries) => entries
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .into_string()
+                    .unwrap_or_default()
+                    .ends_with("-keypair.json")
+                    || e.path()
+                        .extension()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .eq("so")
+            })
+            .fold(Program::default(), |mut acc, curr| {
+                let field = if curr
+                    .path()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .ends_with("-keypair.json")
+                {
+                    &mut acc.keypair
+                } else {
+                    &mut acc.shared_obj
+                };
+                *field = curr.path();
+                acc
+            }),
+    };
+
+    writer.write_all(&toml::to_vec(&Config {
+        program,
+        ..Config::default()
+    })?)?;
+
+    Ok(())
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             url: String::from("https://localhost:8899"),
-            program_so: "./target/deploy/program.so".parse().unwrap(),
-            keypairs: Default::default(),
+            program: Default::default(),
             options: Default::default(),
         }
     }
@@ -77,27 +111,27 @@ impl Default for Config {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            jobs: num_cpus::get(),
-            max_retries: Some(9000),
             sleep: 100,
             timeout: 30,
+            jobs: num_cpus::get(),
+            max_retries: Some(9000),
         }
     }
 }
 
-impl Default for Keypairs {
+impl Default for Program {
     fn default() -> Self {
         Self {
             authority: "~/.config/solana/id.json".parse().unwrap(),
-            program: Some(
-                "./target/deploy/program-keypair.json".parse().unwrap(),
-            ),
+            keypair: "./target/deploy/program-keypair.json".parse().unwrap(),
+            shared_obj: "./target/deploy/program.so".parse().unwrap(),
         }
     }
 }
 
+// Config struct used by CLI.
 pub struct AppConfig {
-    pub url: String,
+    pub url: Url,
     pub program_data: Vec<u8>,
     pub program_keypair: Keypair,
     pub authority: Keypair,
@@ -114,21 +148,14 @@ impl AppConfig {
                 toml::from_slice(&c).context("Failed to parse config file.")
             })?;
 
-        let authority = read_keypair_file(&config.keypairs.authority)
-            .map_err(|e| anyhow!("Couldn't read payer keypair: {e}"))?;
-
-        let program_kp_path = match config.keypairs.program {
-            Some(kp) => kp,
-            None => Self::search_program_kp()?,
-        };
-        let program_keypair = read_keypair_file(program_kp_path)
-            .map_err(|err| anyhow!("Couldn't read program keypair: {}", err))?;
-        let program_data = read_and_verify_elf(&config.program_so)?;
-
-        let send_config = RpcSendTransactionConfig {
-            preflight_commitment: Some(CommitmentLevel::Confirmed),
-            max_retries: config.options.max_retries,
-            ..Default::default()
+        let expand_and_read_keypair = |p: &Path| -> Result<_> {
+            read_keypair_file(shellexpand::full(&p.to_string_lossy())?.as_ref())
+                .map_err(|e| {
+                    anyhow!(
+                        "Couldn't read keypair file ({}): {e}",
+                        p.to_string_lossy()
+                    )
+                })
         };
 
         let client = RpcClient::new_with_timeouts_and_commitment(
@@ -138,46 +165,29 @@ impl AppConfig {
             Duration::from_secs(5),
         );
 
+        let send_config = RpcSendTransactionConfig {
+            preflight_commitment: Some(CommitmentLevel::Confirmed),
+            max_retries: config.options.max_retries,
+            ..Default::default()
+        };
+
+        // TODO: setup multiple programs
+        let program = &config.program;
+        let authority = expand_and_read_keypair(&program.authority)
+            .context("Couldn't read program authority keypair.")?;
+        let program_keypair = expand_and_read_keypair(&program.keypair)
+            .context("Couldn't read program keypair.")?;
+        let program_data = read_and_verify_elf(&program.shared_obj)?;
+
         Ok(Self {
             options: config.options,
-            url: config.url,
+            url: Url::parse(&config.url)?,
             send_config,
             client,
             authority,
             program_data,
             program_keypair,
         })
-    }
-
-    pub fn search_program_kp() -> Result<PathBuf> {
-        // Look for "*-keypair.json" at ./target/deploy
-        let keypair_file = std::fs::read_dir("./target/deploy")
-            .context(
-                "Error looking for program keypair file at ./target/deploy",
-            )?
-            .find(|e| {
-                e.as_ref()
-                    .unwrap()
-                    .file_name()
-                    .into_string()
-                    .unwrap()
-                    .contains("-keypair.json")
-            })
-            .transpose()?
-            .ok_or_else(|| {
-                anyhow!("No keypair file found in ./target/deploy")
-            })?;
-
-        println!(
-            "Using {} as program keypair.",
-            keypair_file.path().to_string_lossy()
-        );
-
-        Ok(keypair_file.path())
-    }
-
-    pub fn search_payer_kp() -> PathBuf {
-        unimplemented!()
     }
 }
 
@@ -236,16 +246,9 @@ pub fn write_to_buffer_account(
     let program_data = &config.program_data;
     let jobs = config.options.jobs;
 
-    let create_msg = |offset: u32, bytes: Vec<u8>, blockhash: Hash| {
-        Message::new_with_blockhash(
-            &[write(&buffer_acc, &payer.pubkey(), offset, bytes)],
-            Some(&payer.pubkey()),
-            &blockhash,
-        )
-    };
-
-    let chunk_sz = calculate_max_chunk_size(&create_msg)?;
+    let chunk_sz = calculate_max_chunk_size(config, buffer_acc)?;
     let tx_count = buffer_len / chunk_sz + 2;
+
     let mut blockhash = client.get_latest_blockhash()?;
     let mut start_time = Instant::now();
 
@@ -259,22 +262,26 @@ pub fn write_to_buffer_account(
 
         let result = thread::scope(move |s| {
             for j in 0..config.options.jobs {
-                let mut stdout = std::io::stdout();
                 let total_index = i * config.options.jobs + j;
 
                 s.spawn(move |_| -> Result<()> {
                     let offset = (total_index * chunk_sz) as u32;
-
                     if offset >= program_data.len() as u32 {
                         return Ok(());
                     }
+
+                    let mut stdout = std::io::stdout();
 
                     let bytes = chunks
                         .chunks(chunk_sz)
                         .nth(j)
                         .ok_or_else(|| anyhow!("Failed to read thread chunk"))?
                         .to_vec();
-                    let msg = create_msg(offset, bytes, blockhash);
+                    let msg = Message::new_with_blockhash(
+                        &[write(&buffer_acc, &payer.pubkey(), offset, bytes)],
+                        Some(&payer.pubkey()),
+                        &blockhash,
+                    );
                     let tx = Transaction::new(&[payer], msg, blockhash);
                     let tx_sig = send_and_confirm_transaction_with_config(
                         client,

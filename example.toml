@@ -1,6 +1,15 @@
 # Url to a Solana RPC cluster.
 url = "https://api.devnet.solana.com"
 
+[program]
+# Path to the program's update authority keypair file.
+# Environment variables are also supported.
+authority = "$HOME/.config/solana/id.json"
+# Path to the program's shared object file.
+shared_obj = "./program.so"
+# Path to the program's keypair file.
+keypair = "./program-keypair.json"
+
 [options]
 # How many threads can be used to send WriteBuffer transactions.
 jobs = 8
@@ -10,12 +19,4 @@ sleep = 100
 timeout = 30
 # RPC client configured max_retries.
 max_retries = 9000
-
-[programs]
-# Path to the program's update authority keypair file.
-authority = "./authority.json"
-# Path to the program's shared object file.
-shared_obj = "./program.so"
-# Path to the program's keypair file.
-keypair = "./program-keypair.json"
 
