@@ -1,4 +1,4 @@
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use crossbeam::thread;
 use crossterm::{cursor, queue, terminal};
 use serde::{Deserialize, Serialize};
@@ -41,7 +41,6 @@ struct Program {
     // TODO: use solana_cli default
     pub authority: PathBuf,
     pub keypair: PathBuf,
-    // TODO: search in target/deploy ?
     pub shared_obj: PathBuf,
 }
 
@@ -51,6 +50,24 @@ pub struct Options {
     pub max_retries: Option<usize>,
     pub sleep: u64,
     pub timeout: u64,
+}
+
+pub fn run(config_path: &Path) -> Result<()> {
+    let config = AppConfig::parse(config_path)?;
+    let buffer_acc = Keypair::new();
+    // Create new buffer account.
+    let buffer_len = create_buffer_account(&config, &buffer_acc)?;
+
+    // Write to buffer account.
+    write_to_buffer_account(&config, buffer_acc.pubkey(), buffer_len)?;
+
+    // Deploy/upgrade program.
+    if let Err(e) = deploy_or_upgrade_program(&config, buffer_acc.pubkey()) {
+        close_buffer_account(&config, buffer_acc.pubkey())?;
+        bail!(e);
+    }
+
+    Ok(())
 }
 
 /// Generates a new configuration file using the defaults and tries to find the program keypair and
@@ -191,8 +208,10 @@ impl AppConfig {
     }
 }
 
-pub fn create_buffer_account(config: &AppConfig) -> Result<(Keypair, usize)> {
-    let buffer_kp = Keypair::new();
+pub fn create_buffer_account(
+    config: &AppConfig,
+    buffer_acc: &Keypair,
+) -> Result<usize> {
     let buffer_sz =
         UpgradeableLoaderState::buffer_len(config.program_data.len())?;
     let min_balance = config
@@ -210,7 +229,7 @@ pub fn create_buffer_account(config: &AppConfig) -> Result<(Keypair, usize)> {
 
     let ix = create_buffer(
         &config.authority.pubkey(),
-        &buffer_kp.pubkey(),
+        &buffer_acc.pubkey(),
         &config.authority.pubkey(),
         min_balance,
         config.program_data.len(),
@@ -221,7 +240,7 @@ pub fn create_buffer_account(config: &AppConfig) -> Result<(Keypair, usize)> {
     let tx = Transaction::new_signed_with_payer(
         &ix,
         Some(&config.authority.pubkey()),
-        &[&config.authority, &buffer_kp],
+        &[&config.authority, buffer_acc],
         blockhash,
     );
     config
@@ -233,7 +252,7 @@ pub fn create_buffer_account(config: &AppConfig) -> Result<(Keypair, usize)> {
         )
         .context("Create buffer tx error")?;
 
-    Ok((buffer_kp, buffer_sz))
+    Ok(buffer_sz)
 }
 
 pub fn write_to_buffer_account(

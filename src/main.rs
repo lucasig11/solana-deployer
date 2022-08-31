@@ -1,6 +1,5 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::Parser;
-use solana_sdk::signer::Signer;
 use std::{fs::File, path::PathBuf, time::Instant};
 
 use solana_deployer::*;
@@ -26,6 +25,7 @@ enum SubCommands {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let start_ts = Instant::now();
 
     if let Some(SubCommands::GenConfig { output }) = args.subcommands {
         let cwd = std::env::current_dir()?;
@@ -41,22 +41,13 @@ fn main() -> Result<()> {
         return generate_config(&mut std::io::stdout(), &cwd);
     }
 
-    let config = AppConfig::parse(args.config_path)?;
-    let start_ts = Instant::now();
-
-    // Create new buffer account.
-    let (buffer_acc, buffer_sz) = create_buffer_account(&config)?;
-
-    // Write to buffer account.
-    write_to_buffer_account(&config, buffer_acc.pubkey(), buffer_sz)?;
-
-    // Deploy/upgrade program.
-    if let Err(e) = deploy_or_upgrade_program(&config, buffer_acc.pubkey()) {
-        close_buffer_account(&config, buffer_acc.pubkey())?;
-        bail!(e);
-    }
-
-    println!("✅ Success! Completed in {}s", start_ts.elapsed().as_secs());
+    match run(&args.config_path) {
+        Ok(_) => println!(
+            "✅ Success! Completed in {}s",
+            start_ts.elapsed().as_secs()
+        ),
+        Err(e) => eprintln!("{e}"),
+    };
 
     Ok(())
 }
