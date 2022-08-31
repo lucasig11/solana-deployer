@@ -1,30 +1,22 @@
-use anyhow::{anyhow, bail, ensure, Context, Result};
-use crossbeam::thread;
-use crossterm::{cursor, queue, terminal};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use solana_client::{
     client_error::reqwest::Url, rpc_client::RpcClient,
     rpc_config::RpcSendTransactionConfig,
 };
 use solana_sdk::{
-    bpf_loader_upgradeable::{
-        close, create_buffer, deploy_with_max_program_len, upgrade, write,
-        UpgradeableLoaderState,
-    },
+    bpf_loader_upgradeable::UpgradeableLoaderState,
     commitment_config::{CommitmentConfig, CommitmentLevel},
-    message::Message,
-    native_token::lamports_to_sol,
-    pubkey::Pubkey,
     signature::{read_keypair_file, Keypair},
     signer::Signer,
-    transaction::Transaction,
 };
 use std::{
     io::Write,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
+mod buffer_account;
 mod utils;
 pub use utils::*;
 
@@ -54,20 +46,19 @@ pub struct Options {
 
 pub fn run(config_path: &Path) -> Result<()> {
     let config = AppConfig::parse(config_path)?;
-
     let buffer_acc = Keypair::new();
     let buffer_len =
         UpgradeableLoaderState::buffer_len(config.program_data.len())?;
 
     // Create new buffer account.
-    create_buffer_account(&config, &buffer_acc, buffer_len)?;
+    buffer_account::create(&config, &buffer_acc, buffer_len)?;
 
-    // Write to buffer account.
-    write_to_buffer_account(&config, buffer_acc.pubkey(), buffer_len)?;
+    // Write program data to buffer account.
+    buffer_account::write_data(&config, buffer_acc.pubkey(), buffer_len)?;
 
     // Deploy/upgrade program.
-    if let Err(e) = deploy_program(&config, buffer_acc.pubkey()) {
-        close_buffer_account(&config, buffer_acc.pubkey())?;
+    if let Err(e) = buffer_account::deploy(&config, buffer_acc.pubkey()) {
+        buffer_account::close(&config, buffer_acc.pubkey())?;
         bail!(e);
     }
 
@@ -210,229 +201,4 @@ impl AppConfig {
             program_keypair,
         })
     }
-}
-
-pub fn create_buffer_account(
-    config: &AppConfig,
-    buffer_acc: &Keypair,
-    buffer_len: usize,
-) -> Result<()> {
-    let min_balance = config
-        .client
-        .get_minimum_balance_for_rent_exemption(buffer_len)?;
-    let payer_balance =
-        config.client.get_balance(&config.authority.pubkey())?;
-
-    println!(
-        "Need {} SOL to create buffer account.\nCurrent balance is: {}",
-        lamports_to_sol(min_balance),
-        lamports_to_sol(payer_balance),
-    );
-
-    ensure!(payer_balance >= min_balance, "Insufficient funds.");
-
-    let ix = create_buffer(
-        &config.authority.pubkey(),
-        &buffer_acc.pubkey(),
-        &config.authority.pubkey(),
-        min_balance,
-        config.program_data.len(),
-    )?;
-
-    let blockhash = config.client.get_latest_blockhash()?;
-
-    let tx = Transaction::new_signed_with_payer(
-        &ix,
-        Some(&config.authority.pubkey()),
-        &[&config.authority, buffer_acc],
-        blockhash,
-    );
-
-    config
-        .client
-        .send_and_confirm_transaction_with_spinner_and_config(
-            &tx,
-            CommitmentConfig::confirmed(),
-            config.send_config,
-        )
-        .context("Create buffer tx error")?;
-
-    Ok(())
-}
-
-pub fn write_to_buffer_account(
-    config: &AppConfig,
-    buffer_acc: Pubkey,
-    buffer_len: usize,
-) -> Result<()> {
-    let payer = &config.authority;
-    let client = &config.client;
-    let program_data = &config.program_data;
-    let jobs = config.options.jobs;
-
-    let chunk_sz = calculate_max_chunk_size(config, buffer_acc)?;
-    let tx_count = buffer_len / chunk_sz + 2;
-
-    let mut blockhash = client.get_latest_blockhash()?;
-    let mut start_time = Instant::now();
-
-    for (i, chunks) in program_data.chunks(chunk_sz * jobs).enumerate() {
-        if start_time.elapsed().as_secs() > 30 {
-            start_time = Instant::now();
-            blockhash = client
-                .get_latest_blockhash()
-                .context("Couldn't get recent blockhash")?
-        };
-
-        let result = thread::scope(move |s| {
-            for j in 0..config.options.jobs {
-                let total_index = i * config.options.jobs + j;
-
-                s.spawn(move |_| -> Result<()> {
-                    let offset = (total_index * chunk_sz) as u32;
-                    if offset >= program_data.len() as u32 {
-                        return Ok(());
-                    }
-
-                    let mut stdout = std::io::stdout();
-
-                    let bytes = chunks
-                        .chunks(chunk_sz)
-                        .nth(j)
-                        .ok_or_else(|| anyhow!("Failed to read thread chunk"))?
-                        .to_vec();
-                    let msg = Message::new_with_blockhash(
-                        &[write(&buffer_acc, &payer.pubkey(), offset, bytes)],
-                        Some(&payer.pubkey()),
-                        &blockhash,
-                    );
-                    let tx = Transaction::new(&[payer], msg, blockhash);
-                    let tx_sig = send_and_confirm_transaction_with_config(
-                        client,
-                        &tx,
-                        client.commitment(),
-                        config.send_config,
-                        config.options.timeout,
-                        config.options.sleep,
-                    )
-                    .context("Write tx error.")?;
-
-                    queue!(stdout, cursor::SavePosition)?;
-                    stdout.write_all(
-                        format!(
-                            "Confirmed ({}/{}): {}",
-                            total_index + 2,
-                            tx_count,
-                            tx_sig
-                        )
-                        .as_ref(),
-                    )?;
-                    queue!(stdout, cursor::RestorePosition)?;
-                    stdout.flush()?;
-                    queue!(
-                        stdout,
-                        cursor::RestorePosition,
-                        terminal::Clear(terminal::ClearType::FromCursorDown)
-                    )?;
-
-                    Ok(())
-                });
-            }
-        });
-
-        if result.is_err() {
-            close_buffer_account(config, buffer_acc)?;
-        }
-    }
-
-    Ok(())
-}
-
-pub fn deploy_program(config: &AppConfig, buffer_acc: Pubkey) -> Result<()> {
-    let client = &config.client;
-    let program = &config.program_keypair;
-    let payer = &config.authority;
-
-    let program_acc = client.get_account(&program.pubkey());
-    let blockhash = client
-        .get_latest_blockhash()
-        .context("Couldn't get recent blockhash.")?;
-
-    let tx = match program_acc {
-        Err(_) => {
-            println!("Deploying {}", program.pubkey());
-
-            let program_lamports = client
-                .get_minimum_balance_for_rent_exemption(
-                    UpgradeableLoaderState::program_len()?,
-                )
-                .context("Couldn't get balance for program.")?;
-
-            let ixs = deploy_with_max_program_len(
-                &payer.pubkey(),
-                &program.pubkey(),
-                &buffer_acc,
-                &payer.pubkey(),
-                program_lamports,
-                config.program_data.len() * 2,
-            )?;
-
-            Transaction::new_signed_with_payer(
-                &ixs,
-                Some(&payer.pubkey()),
-                &[payer, program],
-                blockhash,
-            )
-        }
-        Ok(_) => {
-            println!("Upgrading {}", program.pubkey());
-            Transaction::new_signed_with_payer(
-                &[upgrade(
-                    &program.pubkey(),
-                    &buffer_acc,
-                    &payer.pubkey(),
-                    &payer.pubkey(),
-                )],
-                Some(&payer.pubkey()),
-                &[payer],
-                blockhash,
-            )
-        }
-    };
-
-    client.send_and_confirm_transaction_with_spinner_and_config(
-        &tx,
-        client.commitment(),
-        config.send_config,
-    )?;
-
-    Ok(())
-}
-
-pub fn close_buffer_account(
-    config: &AppConfig,
-    buffer_acc: Pubkey,
-) -> Result<()> {
-    let client = &config.client;
-    let payer = &config.authority;
-    let blockhash = client
-        .get_latest_blockhash()
-        .context("Failed to fetch latest blockhash.")?;
-    let close_ix = close(&buffer_acc, &payer.pubkey(), &payer.pubkey());
-    let close_tx = Transaction::new_signed_with_payer(
-        &[close_ix],
-        Some(&payer.pubkey()),
-        &[payer],
-        blockhash,
-    );
-
-    client
-        .send_and_confirm_transaction_with_spinner_and_config(
-            &close_tx,
-            client.commitment(),
-            config.send_config,
-        )
-        .context("Unable to close the buffer")?;
-
-    Ok(())
 }
