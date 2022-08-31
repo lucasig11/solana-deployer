@@ -54,15 +54,19 @@ pub struct Options {
 
 pub fn run(config_path: &Path) -> Result<()> {
     let config = AppConfig::parse(config_path)?;
+
     let buffer_acc = Keypair::new();
+    let buffer_len =
+        UpgradeableLoaderState::buffer_len(config.program_data.len())?;
+
     // Create new buffer account.
-    let buffer_len = create_buffer_account(&config, &buffer_acc)?;
+    create_buffer_account(&config, &buffer_acc, buffer_len)?;
 
     // Write to buffer account.
     write_to_buffer_account(&config, buffer_acc.pubkey(), buffer_len)?;
 
     // Deploy/upgrade program.
-    if let Err(e) = deploy_or_upgrade_program(&config, buffer_acc.pubkey()) {
+    if let Err(e) = deploy_program(&config, buffer_acc.pubkey()) {
         close_buffer_account(&config, buffer_acc.pubkey())?;
         bail!(e);
     }
@@ -211,20 +215,20 @@ impl AppConfig {
 pub fn create_buffer_account(
     config: &AppConfig,
     buffer_acc: &Keypair,
-) -> Result<usize> {
-    let buffer_sz =
-        UpgradeableLoaderState::buffer_len(config.program_data.len())?;
+    buffer_len: usize,
+) -> Result<()> {
     let min_balance = config
         .client
-        .get_minimum_balance_for_rent_exemption(buffer_sz)?;
+        .get_minimum_balance_for_rent_exemption(buffer_len)?;
     let payer_balance =
         config.client.get_balance(&config.authority.pubkey())?;
 
     println!(
-        "Need {} SOL to create buffer account. Current balance is: {}",
+        "Need {} SOL to create buffer account.\nCurrent balance is: {}",
         lamports_to_sol(min_balance),
         lamports_to_sol(payer_balance),
     );
+
     ensure!(payer_balance >= min_balance, "Insufficient funds.");
 
     let ix = create_buffer(
@@ -243,6 +247,7 @@ pub fn create_buffer_account(
         &[&config.authority, buffer_acc],
         blockhash,
     );
+
     config
         .client
         .send_and_confirm_transaction_with_spinner_and_config(
@@ -252,7 +257,7 @@ pub fn create_buffer_account(
         )
         .context("Create buffer tx error")?;
 
-    Ok(buffer_sz)
+    Ok(())
 }
 
 pub fn write_to_buffer_account(
@@ -343,10 +348,7 @@ pub fn write_to_buffer_account(
     Ok(())
 }
 
-pub fn deploy_or_upgrade_program(
-    config: &AppConfig,
-    buffer_acc: Pubkey,
-) -> Result<()> {
+pub fn deploy_program(config: &AppConfig, buffer_acc: Pubkey) -> Result<()> {
     let client = &config.client;
     let program = &config.program_keypair;
     let payer = &config.authority;
