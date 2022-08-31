@@ -12,9 +12,9 @@ cargo install --git https://github.com/lucasig11/solana-deployer
 
 ## Run
 
-Download the _deploy.toml_ template.
+Generate the configuration template.
 ```sh
-curl https://raw.githubusercontent.com/lucasig11/solana-deployer/master/example.toml -o deploy.toml
+solana-deployer gen-config -o deploy.toml
 ```
 Tweak it.
 ```sh
@@ -22,6 +22,6 @@ $EDITOR deploy.toml
 ```
 Run the deployer.
 ```sh
-solana-deployer [-c configuration_file]
+solana-deployer [-c CONFIG_PATH]
 ```
 
