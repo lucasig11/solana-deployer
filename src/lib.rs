@@ -39,7 +39,7 @@ struct Program {
 #[derive(Serialize, Deserialize)]
 pub struct Options {
     pub jobs: usize,
-    pub max_retries: Option<usize>,
+    pub max_retries: usize,
     pub sleep: u64,
     pub timeout: u64,
 }
@@ -125,8 +125,8 @@ impl Default for Options {
         Self {
             sleep: 100,
             timeout: 30,
+            max_retries: 9000,
             jobs: num_cpus::get(),
-            max_retries: Some(9000),
         }
     }
 }
@@ -149,7 +149,10 @@ pub struct AppConfig {
     pub authority: Keypair,
     pub send_config: RpcSendTransactionConfig,
     pub client: RpcClient,
-    pub options: Options,
+    pub jobs: usize,
+    pub max_retries: usize,
+    pub sleep: Duration,
+    pub timeout: Duration,
 }
 
 impl AppConfig {
@@ -179,7 +182,7 @@ impl AppConfig {
 
         let send_config = RpcSendTransactionConfig {
             preflight_commitment: Some(CommitmentLevel::Confirmed),
-            max_retries: config.options.max_retries,
+            max_retries: Some(config.options.max_retries),
             ..Default::default()
         };
 
@@ -192,13 +195,16 @@ impl AppConfig {
         let program_data = read_and_verify_elf(&program.shared_obj)?;
 
         Ok(Self {
-            options: config.options,
             url: Url::parse(&config.url)?,
             send_config,
             client,
             authority,
             program_data,
             program_keypair,
+            jobs: config.options.jobs,
+            max_retries: config.options.max_retries,
+            timeout: Duration::from_secs(config.options.timeout),
+            sleep: Duration::from_millis(config.options.sleep),
         })
     }
 }

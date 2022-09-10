@@ -1,6 +1,5 @@
 use anyhow::{anyhow, ensure, Context, Result};
 use crossbeam::thread;
-use crossterm::{cursor, queue, terminal};
 use solana_sdk::{
     bpf_loader_upgradeable::{
         self, create_buffer, deploy_with_max_program_len, upgrade,
@@ -14,7 +13,7 @@ use solana_sdk::{
     signer::Signer,
     transaction::Transaction,
 };
-use std::{io::Write, time::Instant};
+use std::time::Instant;
 
 use crate::utils::*;
 use crate::AppConfig;
@@ -75,7 +74,6 @@ pub fn write_data(
     let payer = &config.authority;
     let client = &config.client;
     let program_data = &config.program_data;
-    let jobs = config.options.jobs;
 
     let chunk_sz = calculate_max_chunk_size(config, buffer_acc)?;
     let tx_count = buffer_len / chunk_sz + 2;
@@ -83,7 +81,7 @@ pub fn write_data(
     let mut blockhash = client.get_latest_blockhash()?;
     let mut start_time = Instant::now();
 
-    for (i, chunks) in program_data.chunks(chunk_sz * jobs).enumerate() {
+    for (i, chunks) in program_data.chunks(chunk_sz * config.jobs).enumerate() {
         if start_time.elapsed().as_secs() > 30 {
             start_time = Instant::now();
             blockhash = client
@@ -92,16 +90,13 @@ pub fn write_data(
         };
 
         let result = thread::scope(move |s| {
-            for j in 0..config.options.jobs {
-                let total_index = i * config.options.jobs + j;
-
+            for j in 0..config.jobs {
+                let total_index = i * config.jobs + j;
                 s.spawn(move |_| -> Result<()> {
                     let offset = (total_index * chunk_sz) as u32;
                     if offset >= program_data.len() as u32 {
                         return Ok(());
                     }
-
-                    let mut stdout = std::io::stdout();
 
                     let bytes = chunks
                         .chunks(chunk_sz)
@@ -124,13 +119,12 @@ pub fn write_data(
                         &tx,
                         client.commitment(),
                         config.send_config,
-                        config.options.timeout,
-                        config.options.sleep,
+                        config.timeout,
+                        config.sleep,
                     )
                     .context("Write tx error.")?;
 
-                    queue!(stdout, cursor::SavePosition)?;
-                    stdout.write_all(
+                    term_print(
                         format!(
                             "Confirmed ({}/{}): {}",
                             total_index + 2,
@@ -138,13 +132,6 @@ pub fn write_data(
                             tx_sig
                         )
                         .as_ref(),
-                    )?;
-                    queue!(stdout, cursor::RestorePosition)?;
-                    stdout.flush()?;
-                    queue!(
-                        stdout,
-                        cursor::RestorePosition,
-                        terminal::Clear(terminal::ClearType::FromCursorDown)
                     )?;
 
                     Ok(())

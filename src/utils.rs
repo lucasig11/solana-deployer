@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
+use crossterm::{cursor, queue, terminal};
 use solana_bpf_loader_program::{
     syscalls::register_syscalls, BpfError, ThisInstructionMeter,
 };
 use solana_client::{
     client_error::ClientError, rpc_client::RpcClient,
-    rpc_config::RpcSendTransactionConfig, rpc_response,
+    rpc_config::RpcSendTransactionConfig, rpc_response::Response,
 };
 use solana_program_runtime::invoke_context::InvokeContext;
 use solana_rbpf::{elf, verifier, vm};
@@ -15,6 +16,7 @@ use solana_sdk::{
     transaction_context::TransactionContext,
 };
 use std::{
+    io::Write,
     path::Path,
     time::{Duration, Instant},
 };
@@ -74,25 +76,38 @@ pub fn send_and_confirm_transaction_with_config(
     transaction: &Transaction,
     commitment: CommitmentConfig,
     config: RpcSendTransactionConfig,
-    timeout: u64,
-    sleep: u64,
+    timeout: Duration,
+    sleep: Duration,
 ) -> Result<Signature, ClientError> {
     loop {
         let hash = client.send_transaction_with_config(transaction, config)?;
         let start_time = Instant::now();
 
         loop {
-            if let Ok(rpc_response::Response { value: true, .. }) =
+            if let Ok(Response { value: true, .. }) =
                 client.confirm_transaction_with_commitment(&hash, commitment)
             {
                 return Ok(hash);
             }
-
-            if start_time.elapsed().as_secs() > timeout {
+            if start_time.elapsed() > timeout {
                 break;
             }
 
-            std::thread::sleep(Duration::from_millis(sleep));
+            std::thread::sleep(sleep);
         }
     }
+}
+
+pub fn term_print(s: &str) -> Result<()> {
+    let mut stdout = std::io::stdout();
+    queue!(stdout, cursor::SavePosition)?;
+    stdout.write_all(s.as_ref())?;
+    queue!(stdout, cursor::RestorePosition)?;
+    stdout.flush()?;
+    queue!(
+        stdout,
+        cursor::RestorePosition,
+        terminal::Clear(terminal::ClearType::FromCursorDown)
+    )?;
+    Ok(())
 }
