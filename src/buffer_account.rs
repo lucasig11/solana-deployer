@@ -25,7 +25,8 @@ pub fn create(
 ) -> Result<()> {
     let min_balance = config
         .client
-        .get_minimum_balance_for_rent_exemption(buffer_len)?;
+        .get_minimum_balance_for_rent_exemption(buffer_len)?
+        * 2;
     let payer_balance =
         config.client.get_balance(&config.authority.pubkey())?;
 
