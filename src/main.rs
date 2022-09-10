@@ -5,6 +5,7 @@ use std::{fs::File, path::PathBuf, time::Instant};
 use solana_deployer::*;
 
 #[derive(Parser)]
+/// Deploy Solana programs during high load.
 pub struct Args {
     #[clap(short, long = "config", default_value = "deploy.toml")]
     /// Path to the deploy configuration file.
